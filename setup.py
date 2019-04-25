@@ -11,7 +11,6 @@ setup(name='heliospheric_imager_analysis',
       author='Luke Barnard',
       author_email='l.a.barnard@reading.ac.uk',
       url='https://github.com/LukeBarnard/heliospheric_imager_analysis.git'
-      packages=['heliospheric_imager_analysis'],
       package_data={'heliospheric_imager_analysis': ['config.dat']},
       install_requires=['astropy', 'sunpy', 'numpy', 'scipy', 'glob', 'os'],
       include_package_data=True,
