@@ -13,6 +13,6 @@ setup(name='heliospheric_imager_analysis',
       url='https://github.com/LukeBarnard/heliospheric_imager_analysis.git',
       packages=['heliospheric_imager_analysis'],
       package_data={'heliospheric_imager_analysis': ['config.dat']},
-      install_requires=['astropy', 'sunpy', 'numpy', 'scipy', 'glob', 'os'],
+      install_requires=['astropy', 'sunpy', 'numpy', 'scipy'],
       include_package_data=True,
       zip_safe=False)
