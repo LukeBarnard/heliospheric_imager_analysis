@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "heliospheric_imager_analysis"
+version = "1.0.0"
+description = "Tools for analysing heliospheric imager data"
+readme = "README.md"
+authors = [
+  {name = "Luke Barnard", email = "l.a.barnard@reading.ac.uk" }
+]
+license-files = ["LICENSE.md"]
+requires-python = ">=3.12.11"
+dependencies = [
+  "astropy>=7.1.0",
+  "numpy>=2.2.6",
+  "scipy>=1.16.1",
+  "sunpy>=7.0.1",
+  "sunkit-image>=0.6.0",
+]
+
+[tool.setuptools.package-data]
+"heliospheric_imager_analysis" = ["config.dat"]
+
+[project.urls]
+Homepage = "https://github.com/LukeBarnard/heliospheric_imager_analysis"
+Repository = "https://github.com/LukeBarnard/heliospheric_imager_analysis.git"
+Issues = "https://github.com/LukeBarnard/heliospheric_imager_analysis/issues"
+
+[tool.setuptools.packages.find]
+include = ["images*"]

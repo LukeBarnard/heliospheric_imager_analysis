@@ -6,8 +6,9 @@ import scipy.interpolate as interp
 import scipy.ndimage as ndimage
 import scipy.signal as signal
 import sunpy.map as smap
-import sunpy.image.coalignment as coalign
+from astropy.coordinates import SkyCoord
 import astropy.units as u
+from sunkit_image import coalignment as coalign
 
 def __find_hi_data_path__():
         """
@@ -62,9 +63,9 @@ def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1)
     background_tag = "L2_" + str(background_type) + "_25"
     # Get path up to craft
     if craft == 'sta':
-        craft_tag = 'a\img'
+        craft_tag = os.path.join('a', 'img')
     elif craft == 'stb':
-        craft_tag = 'b\img'
+        craft_tag = os.path.join('b', 'img')
 
     # Get path up to craft
     if camera == 'hi1':
@@ -128,7 +129,7 @@ def suppress_starfield(hi_map, thresh=97.5, res=512):
 
     img = hi_map.data.copy()
     # Get del2 of image, to find horrendous gradients
-    del2 = np.abs(ndimage.filters.laplace(img))
+    del2 = np.abs(ndimage.laplace(img))
     # Find threshold of data, excluding NaNs
     thresh2 = np.percentile(del2[np.isfinite(del2)], thresh)
     abv_thresh = del2 > thresh2
@@ -220,8 +221,8 @@ def align_image(src_map, dst_map):
     :return out_img: Array of src_map image shifted into coordinates of dst_map
     """
     # Note, this doesn't correctly update the header/meta information of src_map.
-    mc = smap.MapCube([src_map, dst_map])
-    # Calcualte the shifts needed to align the images, using sunpy.image.colaignment module.
+    mc = smap.MapSequence([src_map, dst_map])
+    # Calculate the shifts needed to align the images using sunkit-image's coalignment module.
     shifts = coalign.calculate_match_template_shift(mc, layer_index=1, func=get_approx_star_field)
     xshift = (shifts['x'].to('deg') / mc[0].scale.axis1)
     yshift = (shifts['y'].to('deg') / mc[0].scale.axis2)
@@ -236,13 +237,13 @@ def align_image(src_map, dst_map):
     id_bad = np.isnan(src_map.data)
     src_img[id_bad] = img_avg
     # Now shift src_img and bad val mask.
-    src_img_shft = ndimage.interpolation.shift(src_img, to_shift, mode='constant', cval=np.NaN)
+    src_img_shft = ndimage.shift(src_img, to_shift, mode='constant', cval=np.nan)
     # TODO: Would it be better to lower the order on the mask interpolation? Atm, default order=3. Perhaps 1 or 0 more
     # TODO: approptiate for the mask interpolation?
-    id_bad_shft = ndimage.interpolation.shift(id_bad.astype(float), to_shift, mode='constant', cval=1)
+    id_bad_shft = ndimage.shift(id_bad.astype(float), to_shift, mode='constant', cval=1)
     # Correct bad_shft, round values to bad or good, convert to bool, set bad vals in image to nan.
     id_bad_shft = np.round(id_bad_shft).astype(bool)
-    src_img_shft[id_bad_shft] = np.NaN
+    src_img_shft[id_bad_shft] = np.nan
     # Make output map with modified image and src_map header
     src_map_out = smap.Map(src_img_shft, src_map.meta)
     return src_map_out
@@ -279,12 +280,12 @@ def get_image_diff(file_c, file_p, star_suppress=False, align=True, smoothing=Fa
     only configured to do differences of consecutive images. Will return a blank frame if images
     given by file_c and file_p are separated by more then the nominal image cadence for hi1 or hi2, or come from
     different detectors.
-    :param file_c: String, full path to file of image c.
-    :param file_p: String, full path to file of image p.
+    :param file_c: String, full path to the current image file.
+    :param file_p: String, full path to the previous image file.
     :param star_suppress: Bool, True or False on whether star suppression should be performed. Default False
     :param align: Bool, True or False depending on whether images should be aligned before differencing
-    :param smoothing: Bool, True or False depending on whether the differenced image should by smoothed with a median
-                      filter (5x5)
+    :param smoothing: Bool, True or False depending on whether the differenced image should be
+    smoothed with a median filter (5x5)
     :return:
     """
     if not os.path.exists(file_c):
@@ -303,7 +304,7 @@ def get_image_diff(file_c, file_p, star_suppress=False, align=True, smoothing=Fa
 
     if not isinstance(smoothing, bool):
         print("Error: align should be True or False. Defaulting to False")
-        smoothing = True
+        smoothing = False
 
     hi_c = smap.Map(file_c)
 
@@ -349,103 +350,76 @@ def get_image_diff(file_c, file_p, star_suppress=False, align=True, smoothing=Fa
         if smoothing:
             diff_image = signal.medfilt2d(diff_image, (5, 5))
     else:
-        diff_image = hi_c.data.copy()*np.NaN
+        diff_image = hi_c.data.copy()*np.nan
     
     hi_c_diff = smap.Map(diff_image, hi_c.meta)
     return hi_c_diff
 
 
-def convert_hpc_to_hpr(lon, lat):
+def get_all_hpc_coords(himap):
     """
-    Function to convert helioprojective cartesian coordinates (longitudes and latitudes) into helioprojective radial
-    coordinates (elongations and position angles). Conversion done by Eqn. 19 in Thompson 2006.
-    :param lon: Array of longitudes. Should have astropy unit of degrees.
-    :param lat: Array of latitudes. Should have astropy unit of degrees.
-    :return el: Array of elongations with astropy unit of degrees.
-    :return pa: Array of position angles with astropy unit of degrees.
+    Function to get the helioprojective coordinates of a Heliospheric Imager map.
+    :param himap: Heliospheric Imager map.
+    :return
+    lon: longitude
+    lat: latitude
     """
-    # TODO: Check inputs
+    x = np.arange(0, himap.dimensions[0].value, 1) * u.pix
+    y = np.arange(0, himap.dimensions[1].value, 1) * u.pix
+    x, y = np.meshgrid(x, y)
+    hpc = himap.pixel_to_world(x, y)
+    return hpc.Tx, hpc.Ty
 
-    # Put it in rads and without unit for np
-    lon = lon.to('rad').value
-    lat = lat.to('rad').value
-    # Elongation calc:
-    # Get numerator and denomenator for atan2 calculation
-    btm = np.cos(lat) * np.cos(lon)
-    top = np.sqrt((np.cos(lat) ** 2) * (np.sin(lon) ** 2) + (np.sin(lat) ** 2))
-    el = np.arctan2(top, btm)
-    # Position angle calc:
-    btm = np.sin(lat)
-    top = -np.cos(lat) * np.sin(lon)
-    pa = np.arctan2(top, btm)
-    # Correct eastern longitudes so pa runs from 0>2pi, rather than 0>pi.
-    if isinstance(pa, np.float):
-        if lon >= 0:
-            pa += 2 * np.pi
-    else:
-        pa[lon >= 0] += 2 * np.pi
+def get_all_hpr_coords(himap):
+    """
+    Function to get the helioprojective coordinates of a Heliospheric Imager map.
+    :param himap: Heliospheric Imager map.
+    :return
+    el: Elongation angle
+    pa: Position angle
+    """
+    x = np.arange(0, himap.dimensions[0].value, 1) * u.pix
+    y = np.arange(0, himap.dimensions[1].value, 1) * u.pix
+    x, y = np.meshgrid(x, y)
+    hpc = himap.pixel_to_world(x, y)
+    hpr = hpc.transform_to('helioprojectiveradial')
 
-    # Put it back into degs
-    el = np.rad2deg(el) * u.deg
-    pa = np.rad2deg(pa) * u.deg
-    return el, pa
+    return hpr.theta, hpr.psi
 
 
-def convert_hpr_to_hpc(el, pa):
+def create_jmap(hi_files, pa, el_min=5*u.deg, el_max=20*u.deg):
     """
-    Function to convert helioprojective radial coordinates (elongations and position angles) into helioprojective
-    cartesian coordinates (longitudes and latitudes) . Conversion done by Eqn. 20 in Thompson 2006.
-    :param el: Array of elongations. Should have astropy unit of degrees.
-    :param pa: Array of position angles. Should have astropy unit of degrees.
-    :return lon: Array of longitudes with astropy unit of degrees.
-    :return lat: Array of latitudes angles with astropy unit of degrees.
+    Function to create a time-elongation map (J-map) from a set of HI files.
+    :param hi_files: List of Heliospheric Imager files to create a J-map from.
+    :param pa: Position angle with astropy unit of degrees.
+    :param el_min: Minimum elongation to include in the J-map. Default is 5 degrees.
+    :param el_max: Maximum elongation to include in the J-map. Default is 20 degrees.
+    :return jmap: Array containing the J-map data.
     """
-    # TODO: Check inputs
 
-    # Put it in rads and without unit for np
-    el = el.to('rad').value
-    pa = pa.to('rad').value
-    # Longitude calc:
-    # Get numerator and denomenator for atan2 calculation
-    btm = np.cos(el)
-    top = -np.sin(el) * np.sin(pa)
-    lon = np.arctan2(top, btm)
-    # Latitude calc:
-    lat = np.arcsin(np.sin(el) * np.cos(pa))
-    # Put it back into degs
-    lon = np.rad2deg(lon) * u.deg
-    lat = np.rad2deg(lat) * u.deg
-    return lon, lat
+    hi_files.sort()
 
-def convert_pix_to_hpr(x, y, himap):
-    """
-    Function to convert pixel coordinates (longitudes and latitudes) into helioprojective radial
-    coordinates (elongations and position angles). Conversion done by formula in Thompson 2006.
-    :param x: Array of x-pixel coordinates. Should have astropy unit of pixels.
-    :param y: Array of y-pixel coordinates. Should have astropy unit of pixels.
-    :param himap: Sunpy Map object of the Heliospheric Imager file to convert pixel coordinates to HPR coordinates.
-    :return el: Array of elongations with astropy unit of degrees.
-    :return pa: Array of position angles with astropy unit of degrees.
-    """
-    # TODO: Checks for inputs.
-    # Put it in rads for np
-    lon, lat = himap.pixel_to_data(x, y)
-    el, pa = convert_hpc_to_hpr(lon, lat)
-    return el, pa
+    delta_pa = 2.5 * u.deg
+    delta_elon = 0.2 * u.deg
+    elon_bins = np.arange(el_min, el_max + delta_elon, delta_elon)
+    times = []
+    jmap = np.zeros((len(elon_bins) - 1, len(hi_files) - 1))
 
+    fc_list = hi_files[1:]
+    fp_list = hi_files[:-1]
+    for i, (fc, fp) in enumerate(zip(fc_list, fp_list)):
 
-def convert_hpr_to_pix(el, pa, himap):
-    """
-    Function to convert pixel coordinates (longitudes and latitudes) into helioprojective radial
-    coordinates (elongations and position angles). Conversion done by formula in Thompson 2006.
-    :param el: Array of elongations with astropy unit of degrees.
-    :param pa: Array of position angles with astropy unit of degrees.
-    :param himap: Sunpy Map object of the Heliospheric Imager file to convert pixel coordinates to HPR coordinates.
-    :return x: Array of x-pixel coordinates. Should have astropy unit of pixels.
-    :return y: Array of y-pixel coordinates. Should have astropy unit of pixels.
-    """
-    # TODO: Checks for inputs.
-    lon, lat = convert_hpr_to_hpc(el, pa)
-    x, y = himap.data_to_pixel(lon, lat)
-    return x, y
+        himap = get_image_diff(fc, fp, star_suppress=True, align=True, smoothing=True)
+        times.append(himap.meta['date-obs'])
+        el_map, pa_map = get_all_hpr_coords(himap)
+
+        id_pa = (pa_map >= pa - delta_pa) & (pa_map <= pa + delta_pa)
+
+        for j, elon in enumerate(elon_bins):
+
+            id_el = (el_map >= elon - delta_elon) & (el_map <= elon + delta_elon)
+            id_all = id_pa & id_el
+            jmap[j, i] = np.median(himap.data[id_all])
+
+    return jmap
 
