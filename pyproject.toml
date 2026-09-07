@@ -15,13 +15,11 @@ requires-python = ">=3.12.11"
 dependencies = [
   "astropy>=7.1.0",
   "numpy>=2.2.6",
+  "scikit-image>=0.25.2",
   "scipy>=1.16.1",
   "sunpy>=7.0.1",
   "sunkit-image>=0.6.0",
 ]
-
-[tool.setuptools.package-data]
-"heliospheric_imager_analysis" = ["config.dat"]
 
 [project.urls]
 Homepage = "https://github.com/LukeBarnard/heliospheric_imager_analysis"

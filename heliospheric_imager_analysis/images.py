@@ -1,46 +1,34 @@
-import glob
+"""
+This module contains functions for processing and analyzing Heliospheric Imager (HI) data from
+the STEREO mission.
+"""
+from pathlib import Path
+import copy
 import os
 import numpy as np
 import pandas as pd
-import scipy.interpolate as interp
 import scipy.ndimage as ndimage
 import scipy.signal as signal
 import sunpy.map as smap
-from astropy.coordinates import SkyCoord
+from astropy.convolution import Gaussian2DKernel, interpolate_replace_nans
 import astropy.units as u
-from sunkit_image import coalignment as coalign
+from skimage.measure import label
+from sunkit_image.coalignment import phase_cross_correlation_coalign
 
-def __find_hi_data_path__():
-        """
-        Function to load in the path to the STEREO HI data.
-        :return hi_path: Full path of the STEREO HI data
-        """
-        root  = os.path.abspath(os.path.dirname(__file__))
-        hi_path_file = os.path.join(root,'config.dat')
-        
-        if os.path.exists(hi_path_file):
-            with open(hi_path_file, "r") as f:
-                hi_path = f.read()
-        else:
-            print("Error: HI data path file not found.")
-           
-        return hi_path    
 
-def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1):
+def find_hi_files(hi_path, t_start, t_stop, craft="sta", camera="hi1", background_type=1):
     """
     Function to find a subset of the STEREO Heliospheric imager data.
-    :param t_start: Datetime giving start time of data window requested
-    :param t_stop: Datetime giving stop time of data window requested
+    :param hi_path: Path to the top level directory of the STEREO HI data that matches UKSSDC
+                    structure.
+    :param t_start: Datetime giving start time of the data window requested
+    :param t_stop: Datetime giving stop time of the data window requested
     :param craft: String ['sta', 'stb'] to select data from either STEREO-A or STEREO-B.
     :param camera: String ['hi1', 'hi2'] to select data from either HI1 or HI2.
     :param background_type:  Integer [1, 11] to decide between selecting one or eleven day background subtraction.
     :return:
     """
-    # STEREO HI data is stored on a directory tree with the following format:
-    # level > background_type > craft > img > camera > daily_directories > hi_data_files
-
-    # Get HI dirs.
-    hi_path = __find_hi_data_path__()
+    hi_path = Path(hi_path)
 
     # Check the input arguments:
     if craft not in {'sta', 'stb'}:
@@ -60,12 +48,13 @@ def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1)
         background_type = 1
 
     # Work out the right directory names to get to the right part of data tree
-    background_tag = "L2_" + str(background_type) + "_25"
+    background_tag = "L2"
+
     # Get path up to craft
     if craft == 'sta':
-        craft_tag = os.path.join('a', 'img')
+        craft_tag = 'a'
     elif craft == 'stb':
-        craft_tag = os.path.join('b', 'img')
+        craft_tag = 'b'
 
     # Get path up to craft
     if camera == 'hi1':
@@ -73,15 +62,16 @@ def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1)
     elif camera == 'hi2':
         camera_tag = 'hi_2'
 
-    hi_path = os.path.join(hi_path, background_tag, craft_tag, camera_tag)
+    search_path = hi_path / background_tag / craft_tag / "img" / camera_tag
 
     # Use t_start/stop to get list of days to get data
-    day_list = [t.strftime('%Y%m%d') for t in pd.date_range(t_start.date(), t_stop.date(), freq='1D')]
+    day_list = [t.strftime('%Y%m%d') for t in
+                pd.date_range(t_start.date(), t_stop.date(), freq='1D')]
 
     all_files = []
     for day in day_list:
-        path = os.path.join(hi_path, day + '\\*.fts')
-        all_files.extend(glob.glob(path))
+        path = search_path / day
+        all_files.extend(path.glob(f"*{background_type:02d}.fts"))
 
     # Out_files contains all files on dates corresponding to t_start/stop. Now restrict to the exact time window.
     t_min = t_start.strftime('%Y%m%d_%H%M%S')
@@ -90,124 +80,83 @@ def find_hi_files(t_start, t_stop, craft="sta", camera="hi1", background_type=1)
     for file_path in all_files:
         # Get the filename without full path
         file_name = os.path.basename(file_path)
-        # HI files follow naming convention of yyyymmdd_hhmmss_datatag.fts. So first 15 elements give a time string.
-        # TODO: Better way to pull out the timestring?
+        # HI files follow the naming convention of yyyymmdd_hhmmss_datatag.fts.
+        # So the first 15 elements give a time string.
         time_tag = file_name[:15]
-        # TODO:  ERROR?
         if (time_tag >= t_min) and (time_tag <= t_max):
             out_files.append(file_path)
 
     return out_files
 
 
-def suppress_starfield(hi_map, thresh=97.5, res=512):
+def suppress_star_field(himap, thresh=97.5):
     """
-    Function to suppress bright stars in the HI field of view. Is purely data based and does not use star-maps. Looks
-    for large (high gradient) peaks by calculating the Laplacian of the image. Then uses morphological closing to
-    identify the bright "tops" of stars, inside the high-gradient region. Then uses cubic interpolation
-    (scipy.interp.bisplrep) to fill in pixels identified as a star. This is done in blocks over the image. This has
+    Function to suppress bright stars in the HI field of view. Is purely data based and does not use
+    star-maps. It looks for high-gradient peaks by calculating the Laplacian of the image. This has
     only been developed with HI1 data - unsure how it will behave with HI2.
-    :param hi_map: A sunpy map of the HI image the suppress the star field in.
-    :param thresh: Float value containing the percentile threshold used to identify the large gradients associated with
-                   stars. This means valid thresh values must lie in range 0-100, and should normally be high. e.g. 97.5
-    :param res: Int value of block size (in pixels) to iterate over the image in.
-    :return out_img: Star suppressed HI image.
+    :param himap: A sunpy map of the HI image to suppress the star field in.
+    :param thresh: Float value containing the percentile threshold used to identify the large
+                   gradients associated with stars. This means valid thresh values must lie in the
+                   range 0-100, and should normally be high e.g. 97.5.
+    :return himap_sm: A HI sunpy map with the star field suppressed.
     """
     # Check inputs
     if not isinstance(thresh, (float, int)):
         print("Error: Invalid thresh, should be float or int. Defaulting to 97.5")
         thresh = 97.5
     elif (thresh < 0) or (thresh > 100):
-        print("Error: thresh = {} is invalid, should be in range 0-100. Defaulting to 97.5".format(thresh))
+        print("Error: thresh = {} is invalid, should be in range 0-100. Defaulting to 97.5".format(
+            thresh))
         thresh = 97.5
 
-    if not isinstance(res, int):
-        print("Error: Invalid res, should be an int. Defaulting to 512")
-        res = 512
-    elif (res < 0) or np.any((hi_map.data.shape < res)):
-        print("Error: Invalid res, must be greater than zero and less than any of data dimensions")
-
-    img = hi_map.data.copy()
+    himap_out = copy.deepcopy(himap)
+    img = himap_out.data.copy()
     # Get del2 of image, to find horrendous gradients
     del2 = np.abs(ndimage.laplace(img))
     # Find threshold of data, excluding NaNs
     thresh2 = np.percentile(del2[np.isfinite(del2)], thresh)
     abv_thresh = del2 > thresh2
-    # Use binary closing to fill in big stars
-    # TODO: Now fixed del2, can we remove the binary closing?
-    # abv_thresh = ndimage.binary_closing(abv_thresh, structure=np.ones((3, 3)))
 
-    if np.any(abv_thresh):
-        star_r, star_c = np.nonzero(abv_thresh)
-        good_vals = np.isfinite(img)
-        nostar_r, nostar_c = np.nonzero(np.logical_and(~abv_thresh, good_vals))
-    else:
-        print('No points above threshold')
-        out_img = img.copy()
-        return out_img
+    # `star_mask` should include the whole star, not just high-Laplacian pixels.
+    star_mask = ndimage.binary_dilation(abv_thresh, iterations=2)
 
-    # Get interpolation block sizes.
-    dr = res
-    drp = 10
-    dc = res
-    dcp = 10
-    out_img = img.copy()
-    edge_pad = 5
-    for r in range(0, img.shape[0], dr):
+    original_bad = np.isnan(img)
+    to_fill = star_mask & ~original_bad
 
-        if r == 0:
-            # Add 5 pixel window at edge
-            row_id_stars = np.logical_and(star_r >= (r + edge_pad), star_r <= (r + dr))
-            row_id_nostars = np.logical_and(nostar_r >= (r - drp), nostar_r <= (r + dr + drp))
-        elif 0 < r < (img.shape[0] - dr):
-            row_id_stars = np.logical_and(star_r >= r, star_r <= (r + dr))
-            row_id_nostars = np.logical_and(nostar_r >= (r - drp), nostar_r <= (r + dr + drp))
-        elif r == (img.shape[0] - dr):
-            # Add 5 pixel window at edge
-            row_id_stars = np.logical_and(star_r >= r, star_r <= (r + dr - edge_pad))
-            row_id_nostars = np.logical_and(nostar_r >= (r - drp), nostar_r <= (r + dr + drp))
+    work = img.copy()
+    work[to_fill] = np.nan
 
-        for c in range(0, img.shape[1], dr):
+    # Tune this to the apparent stellar PSF width.
+    kernel = Gaussian2DKernel(x_stddev=2)
+    out_img = interpolate_replace_nans(work, kernel)
 
-            if c == 0:
-                # Add 5 pixel window at edge
-                col_id_stars = np.logical_and(star_c > (c + edge_pad), star_c < (c + dc))
-                col_id_nostars = np.logical_and(nostar_c > (c - dcp), nostar_c < (c + dc + dcp))
-            elif 0 < c < (img.shape[1] - dc):
-                col_id_stars = np.logical_and(star_c > c, star_c < (c + dc))
-                col_id_nostars = np.logical_and(nostar_c > (c - dcp), nostar_c < (c + dc + dcp))
-            elif c == (img.shape[1] - dc):
-                # Add 5 pixel window at edge
-                col_id_stars = np.logical_and(star_c > c, star_c < (c + dc - edge_pad))
-                col_id_nostars = np.logical_and(nostar_c > (c - dcp), nostar_c < (c + dc + dcp))
+    # Do not interpolate pixels that were invalid in the original image.
+    out_img[original_bad] = np.nan
 
-            # Interpolate the padded image region.
-            id_find = np.logical_and(row_id_nostars, col_id_nostars)
-            x = nostar_c[id_find]
-            y = nostar_r[id_find]
-            f = interp.bisplrep(x, y, img[y, x], kx=3, ky=3)
-            id_find = np.logical_and(row_id_stars, col_id_stars)
-            x = star_c[id_find]
-            y = star_r[id_find]
-            for i, j in zip(y, x):
-                out_img[i, j] = interp.bisplev(x, y, f)
-
-    # TODO: Make a plot demonstrating how the star suppression works.
-    hi_map.data = out_img.copy()
-    return hi_map
+    himap_out = himap._new_instance(out_img, himap.meta.copy())
+    return himap_out
 
 
-def get_approx_star_field(img):
+def get_approx_star_field(himap, ignore_cmes=False):
     """This function returns a binary array that provides a rough estimate of the locations of stars in the HI1 fov.
      All points above a fixed threshold are 1s, all points below are 0s. Used in the align_image, which is based
     on template matching against the background star-field.
-    :param img: A HI image array
+    :param himap: A sunpy map of a HI image.
+    :param ignore_cmes: If True, remove contiguous regions covering more than 1% of the image area.
     :return img_stars: A binary image showing estimated locations of stars.
     """
-    img_stars = img.copy()
+    img_stars = himap.data.copy()
     img_stars[~np.isfinite(img_stars)] = 0
-    img_stars[img_stars < np.percentile(img_stars, 97.5)] = 0
+    img_stars[img_stars < np.nanpercentile(img_stars, 97.5)] = 0
     img_stars[img_stars != 0] = 1
+
+    if ignore_cmes:
+        labels = label(img_stars.astype(bool))
+        region_sizes = np.bincount(labels.ravel())
+        large_labels = np.flatnonzero(region_sizes > 0.01 * img_stars.size)
+        large_labels = large_labels[large_labels != 0]
+        img_stars[np.isin(labels, large_labels)] = 0
+
     return img_stars
 
 
@@ -220,33 +169,32 @@ def align_image(src_map, dst_map):
     :param dst_map: A SunPy Map of the HI image to match coordinates against
     :return out_img: Array of src_map image shifted into coordinates of dst_map
     """
-    # Note, this doesn't correctly update the header/meta information of src_map.
-    mc = smap.MapSequence([src_map, dst_map])
-    # Calculate the shifts needed to align the images using sunkit-image's coalignment module.
-    shifts = coalign.calculate_match_template_shift(mc, layer_index=1, func=get_approx_star_field)
-    xshift = (shifts['x'].to('deg') / mc[0].scale.axis1)
-    yshift = (shifts['y'].to('deg') / mc[0].scale.axis2)
-    to_shift = [-yshift[0].value, -xshift[0].value]
-    # TODO: Add in warning if shift is larger then some sensible value?
-    # Deal with bad values in the image. Set to a the image median, keep record of the bad values.
-    # Also shift the bad values, to mask out bad values in the shifted image. This is needed as shift routine
-    # can't handle NaNs
+    stars_src = get_approx_star_field(src_map, ignore_cmes=True)
+    stars_dst = get_approx_star_field(dst_map, ignore_cmes=True)
+
+    affine_params = phase_cross_correlation_coalign(stars_src, stars_dst)
+    x_shift, y_shift = affine_params.translation
+    to_shift = (y_shift, x_shift)
+
+    id_bad = ~np.isfinite(src_map.data)
     src_img = src_map.data.copy()
-    # TODO: This method can probably be improved upon. Talk with Chris about this.
-    img_avg = np.nanmedian(src_map.data)
-    id_bad = np.isnan(src_map.data)
-    src_img[id_bad] = img_avg
-    # Now shift src_img and bad val mask.
-    src_img_shft = ndimage.shift(src_img, to_shift, mode='constant', cval=np.nan)
-    # TODO: Would it be better to lower the order on the mask interpolation? Atm, default order=3. Perhaps 1 or 0 more
-    # TODO: approptiate for the mask interpolation?
-    id_bad_shft = ndimage.shift(id_bad.astype(float), to_shift, mode='constant', cval=1)
-    # Correct bad_shft, round values to bad or good, convert to bool, set bad vals in image to nan.
-    id_bad_shft = np.round(id_bad_shft).astype(bool)
+    src_img[id_bad] = np.nanmedian(src_img)
+
+    # A bilinear output can depend on adjacent source pixels.
+    id_bad_for_shift = ndimage.binary_dilation(id_bad, structure=np.ones((3, 3), dtype=bool))
+
+    src_img_shft = ndimage.shift(src_img, to_shift, order=1, mode="constant", cval=np.nan,
+                                 prefilter=False)
+
+    id_bad_shft = ndimage.shift(id_bad_for_shift, to_shift, order=0, mode="constant", cval=True,
+                                prefilter=False).astype(bool)
+
     src_img_shft[id_bad_shft] = np.nan
-    # Make output map with modified image and src_map header
-    src_map_out = smap.Map(src_img_shft, src_map.meta)
+
+    src_map_out = src_map._new_instance(src_img_shft, src_map.meta)
+
     return src_map_out
+
 
 def get_image_plain(hi_file, star_suppress=False):
     """
@@ -265,25 +213,24 @@ def get_image_plain(hi_file, star_suppress=False):
         star_suppress = False
 
     hi_map = smap.Map(hi_file)
-
     if star_suppress:
-        hi_map = suppress_starfield(hi_map)
+        hi_map = suppress_star_field(hi_map)
 
     return hi_map
 
 
 def get_image_diff(file_c, file_p, star_suppress=False, align=True, smoothing=False):
     """
-    Function to produce a differenced image from HI data. Differenced image is calculated as Ic - Ip,
-    loaded from file_c and file_p, respectively. Will optionally perform star field suppression (via
-    hi_processing.suppress_starfield), and also image alignment (via hi_processing.align_image). Is currently
-    only configured to do differences of consecutive images. Will return a blank frame if images
-    given by file_c and file_p are separated by more then the nominal image cadence for hi1 or hi2, or come from
-    different detectors.
+    Function to produce a differenced image from HI data. Differenced image is calculated as
+    Ic - Ip, loaded from file_c and file_p, respectively. It will optionally perform star field
+    suppression and also image alignment. It is currently only configured to do differences of
+    consecutive images. Will return a blank frame if images are separated by more than the
+    nominal image cadence for hi1 or hi2, or come from different detectors.
     :param file_c: String, full path to the current image file.
     :param file_p: String, full path to the previous image file.
-    :param star_suppress: Bool, True or False on whether star suppression should be performed. Default False
-    :param align: Bool, True or False depending on whether images should be aligned before differencing
+    :param star_suppress: Bool, True or False on whether star suppression should be performed.
+                          Default False
+    :param align: Bool, True or False depending on whether to align the images before differencing.
     :param smoothing: Bool, True or False depending on whether the differenced image should be
     smoothed with a median filter (5x5)
     :return:
@@ -338,21 +285,27 @@ def get_image_diff(file_c, file_p, star_suppress=False, align=True, smoothing=Fa
     if produce_diff_flag:
         # Align image p with image c,
         hi_p = align_image(hi_p, hi_c)
+        id_bad_p = np.isnan(hi_p.data)
+        id_bad_c = np.isnan(hi_c.data)
 
         if star_suppress:
-            hi_c = suppress_starfield(hi_c)
-            hi_p = suppress_starfield(hi_p)
+            hi_c = suppress_star_field(hi_c)
+            hi_p = suppress_star_field(hi_p)
 
         # Get difference image,
         diff_image = hi_c.data - hi_p.data
 
         # Apply some median smoothing.
+        id_bad_diff = np.isnan(diff_image)
         if smoothing:
             diff_image = signal.medfilt2d(diff_image, (5, 5))
+
+        id_bad_all = id_bad_diff | id_bad_c | id_bad_p
+        diff_image[id_bad_all] = np.nan
     else:
         diff_image = hi_c.data.copy()*np.nan
-    
-    hi_c_diff = smap.Map(diff_image, hi_c.meta)
+
+    hi_c_diff = hi_c._new_instance(diff_image, hi_c.meta)
     return hi_c_diff
 
 
@@ -385,41 +338,3 @@ def get_all_hpr_coords(himap):
     hpr = hpc.transform_to('helioprojectiveradial')
 
     return hpr.theta, hpr.psi
-
-
-def create_jmap(hi_files, pa, el_min=5*u.deg, el_max=20*u.deg):
-    """
-    Function to create a time-elongation map (J-map) from a set of HI files.
-    :param hi_files: List of Heliospheric Imager files to create a J-map from.
-    :param pa: Position angle with astropy unit of degrees.
-    :param el_min: Minimum elongation to include in the J-map. Default is 5 degrees.
-    :param el_max: Maximum elongation to include in the J-map. Default is 20 degrees.
-    :return jmap: Array containing the J-map data.
-    """
-
-    hi_files.sort()
-
-    delta_pa = 2.5 * u.deg
-    delta_elon = 0.2 * u.deg
-    elon_bins = np.arange(el_min, el_max + delta_elon, delta_elon)
-    times = []
-    jmap = np.zeros((len(elon_bins) - 1, len(hi_files) - 1))
-
-    fc_list = hi_files[1:]
-    fp_list = hi_files[:-1]
-    for i, (fc, fp) in enumerate(zip(fc_list, fp_list)):
-
-        himap = get_image_diff(fc, fp, star_suppress=True, align=True, smoothing=True)
-        times.append(himap.meta['date-obs'])
-        el_map, pa_map = get_all_hpr_coords(himap)
-
-        id_pa = (pa_map >= pa - delta_pa) & (pa_map <= pa + delta_pa)
-
-        for j, elon in enumerate(elon_bins):
-
-            id_el = (el_map >= elon - delta_elon) & (el_map <= elon + delta_elon)
-            id_all = id_pa & id_el
-            jmap[j, i] = np.median(himap.data[id_all])
-
-    return jmap
-
