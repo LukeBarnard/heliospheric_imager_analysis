@@ -14,7 +14,7 @@ from astropy.convolution import Gaussian2DKernel, interpolate_replace_nans
 import astropy.units as u
 from skimage.measure import label
 from sunkit_image.coalignment import phase_cross_correlation_coalign
-
+from sunpy.coordinates import frames, get_body_heliographic_stonyhurst, get_horizons_coord
 
 def find_hi_files(hi_path, t_start, t_stop, craft="sta", camera="hi1", background_type=1):
     """
@@ -338,3 +338,33 @@ def get_all_hpr_coords(himap):
     hpr = hpc.transform_to('helioprojectiveradial')
 
     return hpr.theta, hpr.psi
+
+
+def get_body_hpr_coord(himap, body):
+    """
+    Function to get the helioprojective radial coordinates of a body in a Heliospehric Imager map.
+    :param himap: A Heliospheric Imager map
+    :param body: String name of a body e.g. Earth
+    :return
+    el: Elongation angle
+    pa: Position angle
+    """
+    planets = ['Mercury', 'Venus', 'Earth', 'Mars']
+    missions = ['STEREO-A', 'STEREO-B', 'Parker Solar Probe', 'Solar Orbiter', 'BepiColombo']
+    bodies = planets + missions
+    if body not in bodies:
+        raise ValueError(f"{body} not in list of available bodies: {bodies}")
+
+    if body in planets:
+        body = get_body_heliographic_stonyhurst(body, himap.date)
+    elif body in missions:
+        body = get_horizons_coord(body, himap.date)
+
+    body_hpr = body.transform_to(
+        frames.HelioprojectiveRadial(
+            observer=himap.coordinate_frame.observer,
+            obstime=himap.coordinate_frame.obstime))
+
+    pa = body_hpr.psi.to(u.deg).value
+    el = body_hpr.theta.to(u.deg).value
+    return el, pa

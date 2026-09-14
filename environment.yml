@@ -1,0 +1,16 @@
+name: hi_analysis
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python==3.12.11
+  - astropy>=7.1.0
+  - numpy>=2.2.6
+  - pandas>=2.3.2
+  - requests>=2.32.5
+  - scipy>=1.16.1
+  - sunpy>=7.0.1
+  - scikit-image>=0.26.0
+  - sunkit-image>=0.7.0
