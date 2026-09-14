@@ -27,4 +27,4 @@ Repository = "https://github.com/LukeBarnard/heliospheric_imager_analysis.git"
 Issues = "https://github.com/LukeBarnard/heliospheric_imager_analysis/issues"
 
 [tool.setuptools.packages.find]
-include = ["images*"]
+include = ["heliospheric_imager_analysis"]
